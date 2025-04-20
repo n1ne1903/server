@@ -101,7 +101,9 @@ async def get_summary():
         do_sample=False
     )
     return {"summary": result[0]["summary_text"]}
-
+@app.get("/")
+def root():
+    return {"message": "FastAPI server is up and running 🚀"}
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 #uvicorn servertest:app --reload
