@@ -1,5 +1,6 @@
 fastapi
-uvicorn
-transformers
-torch
+uvicorn[standard]
+transformers==4.37.2
+torch==2.2.2
+ffmpeg-python
 python-multipart
