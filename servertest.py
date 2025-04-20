@@ -1,15 +1,16 @@
-from fastapi import FastAPI, UploadFile, File, Request
+from fastapi import FastAPI, UploadFile, File, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import pipeline
+from functools import lru_cache
 import tempfile
 import os
 import uvicorn
+from transformers import pipeline
 
-# Init FastAPI app
+# --- FastAPI app init ---
 app = FastAPI()
 
-# CORS config (cho phép gọi từ frontend)
+# --- Allow CORS for frontend ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,13 +19,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load AI pipelines
-assignment_summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
-asr_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-base")
+# --- Lightweight model pipelines (optimized for Render Free Tier) ---
+@lru_cache()
+def get_summarizer():
+    return pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")  # ~300MB RAM
 
-# Buffer để lưu transcript từ live recording
+@lru_cache()
+def get_asr():
+    return pipeline("automatic-speech-recognition", model="openai/whisper-tiny")  # ~200MB RAM
+
+# --- In-memory buffer for live transcribe ---
 buffered_transcripts = []
 
+# --- Pydantic schema for assignment evaluation ---
 class AssignmentRequest(BaseModel):
     criteria: str
     brief: str
@@ -36,13 +43,12 @@ async def evaluate(data: AssignmentRequest):
     if len(combined) > 1024:
         combined = combined[:1024]
 
-    result = assignment_summarizer(
-        combined,
-        max_length=150,
-        min_length=60,
-        do_sample=False
-    )
-    return {"feedback": result[0]["summary_text"]}
+    try:
+        summarizer = get_summarizer()
+        result = summarizer(combined, max_length=120, min_length=50, do_sample=False)
+        return {"feedback": result[0]["summary_text"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Summarization failed: {str(e)}")
 
 @app.post("/process_audio")
 async def process_audio(audio: UploadFile = File(...)):
@@ -55,22 +61,21 @@ async def process_audio(audio: UploadFile = File(...)):
         temp_path = tmp.name
 
     try:
-        transcription = asr_pipeline(temp_path)["text"].strip()
+        asr = get_asr()
+        transcription = asr(temp_path)["text"].strip()
+
         wc = len(transcription.split())
-        min_len = 10 if wc < 60 else 60
-        max_len = 60 if wc < 120 else 150
+        min_len = 10 if wc < 60 else 50
+        max_len = 50 if wc < 120 else 120
 
-        summary = assignment_summarizer(
-            transcription,
-            max_length=max_len,
-            min_length=min_len,
-            do_sample=False
-        )[0]["summary_text"]
+        summarizer = get_summarizer()
+        summary = summarizer(transcription, max_length=max_len, min_length=min_len, do_sample=False)[0]["summary_text"]
 
-        return {
-            "transcription": transcription,
-            "summary": summary
-        }
+        return {"transcription": transcription, "summary": summary}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ASR or summarization failed: {str(e)}")
+
     finally:
         os.remove(temp_path)
 
@@ -81,9 +86,11 @@ async def live_transcribe(audio: UploadFile = File(...)):
         temp_path = tmp.name
 
     try:
-        text = asr_pipeline(temp_path)["text"].strip()
+        text = get_asr()(temp_path)["text"].strip()
         buffered_transcripts.append(text)
         return {"transcript": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Live transcription failed: {str(e)}")
     finally:
         os.remove(temp_path)
 
@@ -94,17 +101,16 @@ async def get_summary():
     if not full_text:
         return {"summary": ""}
 
-    result = assignment_summarizer(
-        full_text,
-        max_length=150,
-        min_length=60,
-        do_sample=False
-    )
-    return {"summary": result[0]["summary_text"]}
+    try:
+        summarizer = get_summarizer()
+        result = summarizer(full_text, max_length=120, min_length=50, do_sample=False)
+        return {"summary": result[0]["summary_text"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Summary failed: {str(e)}")
+
 @app.get("/")
 def root():
     return {"message": "FastAPI server is up and running 🚀"}
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-#uvicorn servertest:app --reload
+    uvicorn.run("servertest:app", host="0.0.0.0", port=8000, reload=True)
